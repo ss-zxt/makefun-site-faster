@@ -1,0 +1,15 @@
+# NOTICE
+
+This entry is an independent, faster reimplementation of the behaviour of makefun-site 1.0.0,
+make.fun's own static site generator, written against its published README and source for the
+make.fun competition "Build a static site faster, 22 November 2026". It returns the same output
+tree as the reference for every input.
+
+The reference program and the works it derives from:
+
+- makefun-site 1.0.0, Copyright (c) 2026 make.fun, MIT License.
+- metalsmith 2.7.0, MIT License, Copyright © 2021 webketje; Copyright © 2014-2021 Segment.
+- marked 18.2.1, MIT License, Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/);
+  Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/).
+
+main.ts is the competition's house driver, kept as shipped with the baseline entry.
