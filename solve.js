@@ -13,9 +13,11 @@ const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&
 const ESCAPE_RE = /[&<>"']/g;
 const ESCAPE_TEST = /[&<>"']/;
 
+const escReplacer = (c) => ESCAPES[c];
+
 /** `text` with & < > " and ' escaped; returns the string itself when there is nothing to escape. */
 export function escapeHtml(text) {
-  return ESCAPE_TEST.test(text) ? text.replace(ESCAPE_RE, (c) => ESCAPES[c]) : text;
+  return ESCAPE_TEST.test(text) ? text.replace(ESCAPE_RE, escReplacer) : text;
 }
 
 export const SLUG_MAX = 64;
@@ -250,51 +252,58 @@ const trimLine = (line) => {
 };
 
 const ESCAPABLE = new Set(['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '>']);
+const ESC_TABLE = new Uint8Array(128);
+for (const ch of ESCAPABLE) ESC_TABLE[ch.charCodeAt(0)] = 1;
+
+/** True when the character at s[i] can be backslash-escaped (all escapable characters are ASCII). */
+const escapableAt = (s, i) => {
+  const c = s.charCodeAt(i);
+  return c < 128 && ESC_TABLE[c] === 1;
+};
+
+/** True when s[k] would be consumed as the second half of an escape pair by a left-to-right
+ *  scan from `from`: the backslashes immediately before k pair among themselves, and an odd
+ *  one out pairs with s[k]. Callers guarantee no backslash run crosses `from` (the character
+ *  before `from` is a delimiter, never a backslash), so the run's pairing is self-contained. */
+function isEscapedAt(s, k, from) {
+  let n = 0;
+  for (let j = k - 1; j >= from && s.charCodeAt(j) === 92; j--) n++;
+  return (n & 1) === 1;
+}
 
 function findUnescaped(s, what, from) {
-  for (let j = from; j <= s.length - what.length; j++) {
-    if (s[j] === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) {
-      j++;
-      continue;
-    }
-    if (s.startsWith(what, j)) return j;
-  }
-  return -1;
+  let k = s.indexOf(what, from);
+  while (k !== -1 && isEscapedAt(s, k, from)) k = s.indexOf(what, k + 1);
+  return k;
 }
 
 function findSingleStar(s, from) {
-  for (let j = from; j < s.length; j++) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) {
-      j++;
-      continue;
+  let k = s.indexOf('*', from);
+  while (k !== -1) {
+    if (!isEscapedAt(s, k, from)) {
+      if (s.charCodeAt(k + 1) === 42) {
+        k = s.indexOf('*', k + 2);
+        continue;
+      }
+      return k;
     }
-    if (c !== '*') continue;
-    if (s[j + 1] === '*') {
-      j++;
-      continue;
-    }
-    return j;
+    k = s.indexOf('*', k + 1);
   }
   return -1;
 }
 
+const SPECIAL_RE = /[\\`*\[]/g;
+
 /** `s` rendered inline; `env.link(target)` is a link's href. Plain runs are jumped over with
- *  native searches and escaped in bulk; only construct characters are handled one by one. */
+ *  one native search and escaped in bulk; only construct characters are handled one by one. */
 export function inline(s, env) {
   let out = '';
   let i = 0;
   const len = s.length;
   while (i < len) {
-    let j = len;
-    let idx = s.indexOf('\\', i);
-    if (idx !== -1 && idx < j) j = idx;
-    idx = s.indexOf('`', i);
-    if (idx !== -1 && idx < j) j = idx;
-    idx = s.indexOf('*', i);
-    if (idx !== -1 && idx < j) j = idx;
-    idx = s.indexOf('[', i);
-    if (idx !== -1 && idx < j) j = idx;
+    SPECIAL_RE.lastIndex = i;
+    const hit = SPECIAL_RE.exec(s);
+    const j = hit === null ? len : hit.index;
     if (j > i) {
       out += escapeHtml(s.slice(i, j));
       i = j;
@@ -302,7 +311,7 @@ export function inline(s, env) {
     if (i >= len) break;
     const code = s.charCodeAt(i);
     if (code === 92) {
-      if (i + 1 < len && ESCAPABLE.has(s[i + 1])) {
+      if (i + 1 < len && escapableAt(s, i + 1)) {
         out += escapeHtml(s[i + 1]);
         i += 2;
       } else {
@@ -627,9 +636,9 @@ function genNodes(nodes, out) {
       }
       case 'for': {
         const id = ++uid;
-        out.push(`{const xs${id}=H.L(S,${JSON.stringify(n.path)});if(Array.isArray(xs${id})){const len${id}=xs${id}.length;for(let k${id}=0;k${id}<len${id};k${id}++){S.push({[${JSON.stringify(n.name)}]:xs${id}[k${id}],loop:{index:k${id}+1,first:k${id}===0,last:k${id}===len${id}-1,length:len${id}}});`);
+        out.push(`{const xs${id}=H.L(S,${JSON.stringify(n.path)});if(Array.isArray(xs${id})){const len${id}=xs${id}.length;const sc${id}={loop:{index:0,first:false,last:false,length:len${id}}};S.push(sc${id});for(let k${id}=0;k${id}<len${id};k${id}++){sc${id}[${JSON.stringify(n.name)}]=xs${id}[k${id}];const lp${id}=sc${id}.loop;lp${id}.index=k${id}+1;lp${id}.first=k${id}===0;lp${id}.last=k${id}===len${id}-1;`);
         genNodes(n.body, out);
-        out.push('S.pop();}}}');
+        out.push('}S.pop();}}');
         break;
       }
       case 'include':
@@ -666,17 +675,22 @@ const byCodeUnits = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 /** The words of a body given as its lines: its runs of characters other than whitespace.
  *  Words never span lines (the line break is whitespace), so lines count independently.
  *  The whitespace set is exactly JavaScript's \s, checked by code unit. */
+/** Whitespace by code unit, exactly JavaScript's \s (the set wordsOfLines counts against). */
+const WS_TABLE = new Uint8Array(65536);
+for (let c = 0; c < 65536; c++) {
+  WS_TABLE[c] = c <= 32
+    ? (c === 32 || (c >= 9 && c <= 13) ? 1 : 0)
+    : (c === 160 || c === 5760 || (c >= 8192 && c <= 8202) || c === 8232 || c === 8233 || c === 8239 || c === 8287 || c === 12288 || c === 65279 ? 1 : 0);
+}
+
 function wordsOfLines(lines) {
   let n = 0;
   for (const text of lines) {
     let inWord = false;
     for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      const ws = code <= 32
-        ? code === 32 || (code >= 9 && code <= 13)
-        : code === 160 || code === 5760 || (code >= 8192 && code <= 8202) || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
-      if (!ws && !inWord) { n++; inWord = true; }
-      else if (ws) inWord = false;
+      if (WS_TABLE[text.charCodeAt(i)] === 0) {
+        if (!inWord) { n++; inWord = true; }
+      } else inWord = false;
     }
   }
   return n;
